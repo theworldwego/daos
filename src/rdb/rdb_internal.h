@@ -214,7 +214,7 @@ CRT_RPC_DECLARE(rdb_op, DAOS_ISEQ_RDB_OP, DAOS_OSEQ_RDB_OP)
 
 #define DAOS_ISEQ_RDB_REQUESTVOTE /* input fields */		 \
 	((struct rdb_op_in)	(rvi_op)		CRT_VAR) \
-	((msg_requestvote_t)	(rvi_msg)		CRT_VAR)
+	((msg_requestvote_t)	(rvi_msg)		CRT_RAW)
 
 #define DAOS_OSEQ_RDB_REQUESTVOTE /* output fields */		 \
 	((struct rdb_op_out)	(rvo_op)		CRT_VAR) \
@@ -246,7 +246,7 @@ struct rdb_local {
 	/* chunk sequence number */				 \
 	((uint64_t)		(isi_seq)		CRT_VAR) \
 	/* chunk anchor */					 \
-	((struct rdb_anchor)	(isi_anchor)		CRT_VAR) \
+	((struct rdb_anchor)	(isi_anchor)		CRT_RAW) \
 	/* daos_key_desc_t[] */					 \
 	((crt_bulk_t)		(isi_kds)		CRT_VAR) \
 	/* described by isi_kds */				 \
@@ -263,7 +263,7 @@ struct rdb_local {
 	/* last seq number */					 \
 	((uint64_t)		(iso_seq)		CRT_VAR) \
 	/* last anchor */					 \
-	((struct rdb_anchor)	(iso_anchor)		CRT_VAR)
+	((struct rdb_anchor)	(iso_anchor)		CRT_RAW)
 
 CRT_RPC_DECLARE(rdb_installsnapshot, DAOS_ISEQ_RDB_INSTALLSNAPSHOT,
 		DAOS_OSEQ_RDB_INSTALLSNAPSHOT)

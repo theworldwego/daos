@@ -33,27 +33,6 @@
 #include "rdb_internal.h"
 
 static int
-crt_proc_msg_requestvote_t(crt_proc_t proc, msg_requestvote_t *p)
-{
-	int rc;
-
-	rc = crt_proc_int32_t(proc, &p->term);
-	if (rc != 0)
-		return -DER_HG;
-	rc = crt_proc_int32_t(proc, &p->candidate_id);
-	if (rc != 0)
-		return -DER_HG;
-	rc = crt_proc_int32_t(proc, &p->last_log_idx);
-	if (rc != 0)
-		return -DER_HG;
-	rc = crt_proc_int32_t(proc, &p->last_log_term);
-	if (rc != 0)
-		return -DER_HG;
-
-	return 0;
-}
-
-static int
 crt_proc_msg_requestvote_response_t(crt_proc_t proc,
 				    msg_requestvote_response_t *p)
 {
@@ -214,42 +193,6 @@ crt_proc_msg_installsnapshot_response_t(crt_proc_t proc,
 	if (rc != 0)
 		return -DER_HG;
 	rc = crt_proc_int32_t(proc, &p->complete);
-	if (rc != 0)
-		return -DER_HG;
-
-	return 0;
-}
-
-static int
-crt_proc_daos_anchor_t(crt_proc_t proc, daos_anchor_t *p)
-{
-	int rc;
-
-	rc = crt_proc_uint16_t(proc, &p->da_type);
-	if (rc != 0)
-		return -DER_HG;
-	rc = crt_proc_uint16_t(proc, &p->da_shard);
-	if (rc != 0)
-		return -DER_HG;
-	rc = crt_proc_uint32_t(proc, &p->da_flags);
-	if (rc != 0)
-		return -DER_HG;
-	rc = crt_proc_memcpy(proc, &p->da_buf, sizeof(p->da_buf));
-	if (rc != 0)
-		return -DER_HG;
-
-	return 0;
-}
-
-static int
-crt_proc_struct_rdb_anchor(crt_proc_t proc, struct rdb_anchor *p)
-{
-	int rc;
-
-	rc = crt_proc_daos_anchor_t(proc, &p->da_object);
-	if (rc != 0)
-		return -DER_HG;
-	rc = crt_proc_daos_anchor_t(proc, &p->da_akey);
 	if (rc != 0)
 		return -DER_HG;
 
