@@ -55,7 +55,7 @@ enum swim_member_status {
 struct swim_member_state {
 	uint64_t		 sms_incarnation; /**< incarnation number */
 	enum swim_member_status	 sms_status;	  /**< status of member */
-	uint32_t		 sms_padding;
+	uint32_t		 sms_delay;
 };
 
 struct swim_member_update {
@@ -208,7 +208,8 @@ int swim_progress(struct swim_context *ctx, int64_t timeout);
  *                   ALL timeouts will be shifted.
  * @returns          0 on success, negative error ID otherwise
  */
-int swim_net_glitch_update(struct swim_context *ctx, uint64_t delay);
+int swim_net_glitch_update(struct swim_context *ctx, swim_id_t id,
+			   uint64_t delay);
 /** @} */
 
 #ifdef __cplusplus
