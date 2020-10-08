@@ -34,6 +34,8 @@ var (
 	DataPlaneName = "DAOS I/O Server"
 	// ManagementServiceName defines a consistent name for the Management Service.
 	ManagementServiceName = "DAOS Management Service"
+	// ManagementServiceLeaderID defines the service name to be monitored for raft leadership changes.
+	ManagementServiceLeaderID = "daos.ManagementServiceLeader"
 
 	// DefaultControlPort defines the default control plane listener port.
 	DefaultControlPort = 10001

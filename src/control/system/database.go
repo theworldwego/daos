@@ -27,22 +27,21 @@ import (
 	"context"
 	"net"
 	"os"
-	"path/filepath"
 	"sort"
 	"sync"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/hashicorp/raft"
-	raftboltdb "github.com/hashicorp/raft-boltdb"
 	"github.com/pkg/errors"
 
+	"github.com/daos-stack/daos/src/control/build"
 	"github.com/daos-stack/daos/src/control/common"
+	"github.com/daos-stack/daos/src/control/lib/atm"
 	"github.com/daos-stack/daos/src/control/logging"
 )
 
 const (
-	sysDBFile            = "daos_system.db"
 	CurrentSchemaVersion = 0
 )
 
@@ -52,6 +51,7 @@ type (
 
 	raftService interface {
 		Apply([]byte, time.Duration) raft.ApplyFuture
+		AddVoter(raft.ServerID, raft.ServerAddress, uint64, time.Duration) raft.IndexFuture
 		BootstrapCluster(raft.Configuration) raft.Future
 		Leader() raft.ServerAddress
 		LeaderCh() <-chan bool
@@ -90,7 +90,9 @@ type (
 		log                logging.Logger
 		cfg                *DatabaseConfig
 		replicaAddr        *syncTCPAddr
+		isBootstrap        atm.Bool
 		raft               raftService
+		raftTransport      raft.Transport
 		onLeadershipGained []onLeadershipGainedFn
 		onLeadershipLost   []onLeadershipLostFn
 
@@ -99,8 +101,10 @@ type (
 
 	// DatabaseConfig defines the configuration for the system database.
 	DatabaseConfig struct {
-		Replicas []string
-		RaftDir  string
+		LocalAddr  *net.TCPAddr
+		Replicas   []string
+		RaftDir    string
+		SystemName string
 	}
 
 	// GroupMap represents a version of the system membership map.
@@ -130,18 +134,23 @@ func (sta *syncTCPAddr) get() *net.TCPAddr {
 }
 
 // NewDatabase returns a configured and initialized Database instance.
-func NewDatabase(log logging.Logger, cfg *DatabaseConfig) *Database {
+func NewDatabase(log logging.Logger, cfg *DatabaseConfig) (*Database, error) {
 	if cfg == nil {
 		cfg = &DatabaseConfig{}
 	}
 
-	return &Database{
+	if cfg.SystemName == "" {
+		cfg.SystemName = build.DefaultSystemName
+	}
+
+	db := &Database{
 		log:         log,
 		cfg:         cfg,
 		replicaAddr: &syncTCPAddr{},
 
 		data: &dbData{
 			log: log,
+
 			Members: &MemberDatabase{
 				Ranks: make(MemberRankMap),
 				Uuids: make(MemberUuidMap),
@@ -154,6 +163,19 @@ func NewDatabase(log logging.Logger, cfg *DatabaseConfig) *Database {
 			SchemaVersion: CurrentSchemaVersion,
 		},
 	}
+
+	if db.cfg.LocalAddr != nil {
+		replicaAddr, isBootstrap, err := db.checkReplica(db.cfg.LocalAddr)
+		if err != nil {
+			return nil, err
+		}
+		db.setReplica(replicaAddr)
+		if isBootstrap {
+			db.isBootstrap.SetTrue()
+		}
+	}
+
+	return db, nil
 }
 
 // resolveReplicas converts the string-based representations of replica
@@ -172,7 +194,7 @@ func (db *Database) resolveReplicas() (reps []*net.TCPAddr, err error) {
 // checkReplica compares the supplied control address to the list of
 // configured replica addresses. If it matches, then the resolved
 // replica address is returned. The first replica is used to bootstrap
-// the raft service (more work to be done for multi-replica support).
+// the raft service.
 func (db *Database) checkReplica(ctrlAddr *net.TCPAddr) (repAddr *net.TCPAddr, isBootStrap bool, err error) {
 	var repAddrs []*net.TCPAddr
 	repAddrs, err = db.resolveReplicas()
@@ -196,10 +218,23 @@ func (db *Database) checkReplica(ctrlAddr *net.TCPAddr) (repAddr *net.TCPAddr, i
 	return
 }
 
+// SystemName returns the system name set in the configuration.
+func (db *Database) SystemName() string {
+	return db.cfg.SystemName
+}
+
+// LeaderQuery returns the system leader, if known.
+func (db *Database) LeaderQuery() (leader string, replicas []string, err error) {
+	if !db.IsReplica() {
+		return "", nil, &ErrNotReplica{db.cfg.Replicas}
+	}
+	return string(db.raft.Leader()), db.cfg.Replicas, nil
+}
+
 // ReplicaAddr returns the system's replica address if
 // the system is configured as a MS replica.
 func (db *Database) ReplicaAddr() (*net.TCPAddr, error) {
-	if !db.isReplica() {
+	if !db.IsReplica() {
 		return nil, &ErrNotReplica{db.cfg.Replicas}
 	}
 	return db.getReplica(), nil
@@ -211,23 +246,35 @@ func (db *Database) getReplica() *net.TCPAddr {
 
 func (db *Database) setReplica(addr *net.TCPAddr) {
 	db.replicaAddr.set(addr)
+	db.log.Debugf("set db replica addr: %s", addr)
 }
 
-func (db *Database) isReplica() bool {
-	return db.getReplica() != nil
+func (db *Database) IsReplica() bool {
+	return db != nil && db.getReplica() != nil
+}
+
+func (db *Database) IsBootstrap() bool {
+	return db.IsReplica() && db.isBootstrap.IsTrue()
 }
 
 func (db *Database) checkLeader() error {
-	if !db.isReplica() {
+	if db.raft == nil || !db.IsReplica() {
 		return &ErrNotReplica{db.cfg.Replicas}
 	}
 	if db.raft.State() != raft.Leader {
 		return &ErrNotLeader{
-			LeaderHint: string(db.raft.Leader()),
+			LeaderHint: db.leaderHint(),
 			Replicas:   db.cfg.Replicas,
 		}
 	}
 	return nil
+}
+
+func (db *Database) leaderHint() string {
+	if db.raft != nil {
+		return string(db.raft.Leader())
+	}
+	return ""
 }
 
 // IsLeader returns a boolean indicating whether or not this
@@ -252,86 +299,40 @@ func (db *Database) OnLeadershipLost(fns ...onLeadershipLostFn) {
 // not, it returns early without an error. If it is, the persistent storage
 // is initialized if necessary, and the replica is started to begin the
 // process of choosing a MS leader.
-func (db *Database) Start(ctx context.Context, ctrlAddr *net.TCPAddr) error {
-	var needsBootStrap bool
-
-	replicaAddr, isBootStrap, err := db.checkReplica(ctrlAddr)
-	if err != nil {
-		return err
-	}
-	db.setReplica(replicaAddr)
-	db.log.Debugf("system db start: isReplica: %t, isBootStrap: %t", db.isReplica(), isBootStrap)
-
-	// If we're not a replica, exit early.
-	if !db.isReplica() {
+func (db *Database) Start(ctx context.Context) error {
+	if !db.IsReplica() {
 		return nil
 	}
+
+	db.log.Debugf("system db start: isReplica: %t, isBootstrap: %t", db.IsReplica(), db.IsBootstrap())
+
+	var newDB bool
 
 	if _, err := os.Stat(db.cfg.RaftDir); err != nil {
 		if !os.IsNotExist(err) {
 			return errors.Wrapf(err, "can't Stat() %s", db.cfg.RaftDir)
 		}
-		needsBootStrap = true
+		newDB = true
 		if err := os.Mkdir(db.cfg.RaftDir, 0700); err != nil {
 			return errors.Wrapf(err, "failed to Mkdir() %s", db.cfg.RaftDir)
 		}
 	}
 
-	rc := raft.DefaultConfig()
-	rc.Logger = newHcLogger(db.log)
-	rc.SnapshotThreshold = 16 // arbitrarily low to exercise snapshots
-	//rc.SnapshotInterval = 5 * time.Second
-	rc.HeartbeatTimeout = 250 * time.Millisecond
-	rc.ElectionTimeout = 250 * time.Millisecond
-	rc.LeaderLeaseTimeout = 125 * time.Millisecond
-	rc.LocalID = raft.ServerID(db.getReplica().String())
-	// Just use an in-memory transport for the moment, until
-	// we add real replica support over gRPC.
-	_, transport := raft.NewInmemTransport(raft.NewInmemAddr())
-
-	snaps, err := raft.NewFileSnapshotStoreWithLogger(db.cfg.RaftDir, 2, rc.Logger)
-	if err != nil {
-		return err
+	if err := db.configureRaft(); err != nil {
+		return errors.Wrap(err, "unable to configure raft service")
 	}
 
-	sysDBPath := filepath.Join(db.cfg.RaftDir, sysDBFile)
-	boltDB, err := raftboltdb.NewBoltStore(sysDBPath)
-	if err != nil {
-		return err
-	}
-	db.raft, err = raft.NewRaft(rc, (*fsm)(db), boltDB, boltDB, snaps, transport)
-	if err != nil {
-		return err
-	}
-
-	// For the moment, we need to use a special bootstrap mechanism which allows
-	// the raft service to start without a quorum of replicas. When we add replica
-	// support, this will likely need to be reworked.
-	if isBootStrap && needsBootStrap {
-		db.log.Debugf("bootstrapping MS on %s", rc.LocalID)
-		bsc := raft.Configuration{
-			Servers: []raft.Server{
-				{
-					ID:      rc.LocalID,
-					Address: transport.LocalAddr(),
-				},
-			},
-		}
-		if future := db.raft.BootstrapCluster(bsc); future.Error() != nil {
-			return errors.Wrapf(err, "failed to bootstrap raft instance on %s", rc.LocalID)
-		}
-
-		// FIXME DAOS-5656: retain dependency on rank 0
-		db.data.NextRank = 1
+	if err := db.startRaft(newDB); err != nil {
+		return errors.Wrap(err, "unable to start raft service")
 	}
 
 	// Kick off a goroutine to monitor the leadership state channel.
-	go db.monitorLeadershipState(ctx, rc)
+	go db.monitorLeadershipState(ctx)
 
 	return nil
 }
 
-func (db *Database) monitorLeadershipState(parent context.Context, rc *raft.Config) {
+func (db *Database) monitorLeadershipState(parent context.Context) {
 	var cancelGainedCtx context.CancelFunc
 	for {
 		select {
@@ -343,7 +344,7 @@ func (db *Database) monitorLeadershipState(parent context.Context, rc *raft.Conf
 			return
 		case isLeader := <-db.raft.LeaderCh():
 			if !isLeader {
-				db.log.Debugf("node %s lost MS leader state", rc.LocalID)
+				db.log.Debugf("node %s lost MS leader state", db.replicaAddr)
 				if cancelGainedCtx != nil {
 					cancelGainedCtx()
 				}
@@ -357,7 +358,7 @@ func (db *Database) monitorLeadershipState(parent context.Context, rc *raft.Conf
 				return
 			}
 
-			db.log.Debugf("node %s gained MS leader state", rc.LocalID)
+			db.log.Debugf("node %s gained MS leader state", db.replicaAddr)
 			var gainedCtx context.Context
 			gainedCtx, cancelGainedCtx = context.WithCancel(parent)
 			for _, fn := range db.onLeadershipGained {
@@ -425,10 +426,6 @@ func (db *Database) ReplicaRanks() (*GroupMap, error) {
 	// should we return all ready ranks per replica, for resiliency?
 	gm := newGroupMap(db.data.MapVersion)
 	for _, srv := range db.data.Members.Ranks {
-		// FIXME DAOS-5656: retain dependency on rank 0
-		if !srv.Rank.Equals(0) {
-			continue
-		}
 		repAddr, _, err := db.checkReplica(srv.Addr)
 		if err != nil || repAddr == nil ||
 			!(srv.state == MemberStateJoined || srv.state == MemberStateReady) {
@@ -533,6 +530,20 @@ func (db *Database) AddMember(newMember *Member) error {
 	if newMember.Rank.Equals(NilRank) {
 		newMember.Rank = db.data.NextRank
 		mu.NextRank = true
+	}
+
+	// If the new member is a MS replica, add it as a voter.
+	if !common.CmpTcpAddr(db.getReplica(), newMember.Addr) {
+		repAddr, _, err := db.checkReplica(newMember.Addr)
+		if err != nil {
+			return err
+		}
+
+		rsi := raft.ServerID(repAddr.String())
+		rsa := raft.ServerAddress(repAddr.String())
+		if f := db.raft.AddVoter(rsi, rsa, 0, 0); f.Error() != nil {
+			return errors.Wrapf(err, "failed to add %q as raft replica", repAddr)
+		}
 	}
 
 	if err := db.submitMemberUpdate(raftOpAddMember, mu); err != nil {

@@ -60,7 +60,7 @@ var (
 	FaultConfigBadAccessPoints = serverFault(
 		code.ServerConfigBadAccessPoints,
 		"invalid list of access points in configuration",
-		"only a single access point is currently supported, specify only one and restart the control server",
+		"'access_points' must have at least one entry; fix the configuration and restart the control server",
 	)
 	FaultConfigNoProvider = serverFault(
 		code.ServerConfigBadProvider,

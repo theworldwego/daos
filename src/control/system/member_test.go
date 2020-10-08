@@ -799,7 +799,7 @@ func TestSystem_Membership_Join(t *testing.T) {
 		"not leader": {
 			notLeader: true,
 			req:       &JoinRequest{},
-			expErr:    &ErrNotLeader{},
+			expErr:    errors.New("leader"),
 		},
 		"successful rejoin": {
 			req: &JoinRequest{

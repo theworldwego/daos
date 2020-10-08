@@ -661,13 +661,6 @@ func TestServer_CtlSvc_SystemQuery(t *testing.T) {
 			mgmtSvc := newTestMgmtSvcMulti(t, log, maxIOServers, false)
 			cs.harness = mgmtSvc.harness
 			cs.harness.started.SetTrue()
-			m := newMgmtSvcClient(
-				context.Background(), log, mgmtSvcClientCfg{
-					AccessPoints: []string{defaultAP},
-				},
-			)
-			cs.harness.instances[0].msClient = m
-			cs.harness.instances[0]._superblock.MS = true
 			cs.harness.instances[0]._superblock.Rank = system.NewRankPtr(0)
 
 			ctx := context.TODO()
@@ -944,13 +937,6 @@ func TestServer_CtlSvc_SystemStart(t *testing.T) {
 			mgmtSvc := newTestMgmtSvcMulti(t, log, maxIOServers, false)
 			cs.harness = mgmtSvc.harness
 			cs.harness.started.SetTrue()
-			m := newMgmtSvcClient(
-				context.Background(), log, mgmtSvcClientCfg{
-					AccessPoints: []string{defaultAP},
-				},
-			)
-			cs.harness.instances[0].msClient = m
-			cs.harness.instances[0]._superblock.MS = true
 			cs.harness.instances[0]._superblock.Rank = system.NewRankPtr(0)
 
 			ctx := context.TODO()
@@ -1366,13 +1352,6 @@ func TestServer_CtlSvc_SystemStop(t *testing.T) {
 			mgmtSvc := newTestMgmtSvcMulti(t, log, maxIOServers, false)
 			cs.harness = mgmtSvc.harness
 			cs.harness.started.SetTrue()
-			m := newMgmtSvcClient(
-				context.Background(), log, mgmtSvcClientCfg{
-					AccessPoints: []string{defaultAP},
-				},
-			)
-			cs.harness.instances[0].msClient = m
-			cs.harness.instances[0]._superblock.MS = true
 			cs.harness.instances[0]._superblock.Rank = system.NewRankPtr(0)
 
 			ctx := context.TODO()
@@ -1596,13 +1575,6 @@ func TestServer_CtlSvc_SystemResetFormat(t *testing.T) {
 			mgmtSvc := newTestMgmtSvcMulti(t, log, maxIOServers, false)
 			cs.harness = mgmtSvc.harness
 			cs.harness.started.SetTrue()
-			m := newMgmtSvcClient(
-				context.Background(), log, mgmtSvcClientCfg{
-					AccessPoints: []string{defaultAP},
-				},
-			)
-			cs.harness.instances[0].msClient = m
-			cs.harness.instances[0]._superblock.MS = true
 			cs.harness.instances[0]._superblock.Rank = system.NewRankPtr(0)
 
 			ctx := context.TODO()

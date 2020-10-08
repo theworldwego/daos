@@ -189,15 +189,27 @@ func Start(log *logging.LeveledLogger, cfg *Configuration) error {
 
 	// If this daos_server instance ends up being the MS leader,
 	// this will record the DAOS system membership.
-	sysdb := system.NewDatabase(log, &system.DatabaseConfig{
-		Replicas: cfg.AccessPoints,
-		RaftDir:  raftDir(cfg),
+	sysdb, err := system.NewDatabase(log, &system.DatabaseConfig{
+		LocalAddr:  controlAddr,
+		Replicas:   cfg.AccessPoints,
+		RaftDir:    raftDir(cfg),
+		SystemName: cfg.SystemName,
 	})
+	if err != nil {
+		return errors.Wrap(err, "failed to create system database")
+	}
 	membership := system.NewMembership(log, sysdb)
 	scmProvider := scm.DefaultProvider(log)
 	harness := NewIOServerHarness(log).WithFaultDomain(faultDomain)
 	mgmtSvc := newMgmtSvc(harness, membership, sysdb)
 	var netDevClass uint32
+
+	// Create rpcClient for inter-server communication.
+	cliCfg := control.DefaultConfig()
+	cliCfg.TransportConfig = cfg.TransportConfig
+	rpcClient := control.NewClient(
+		control.WithConfig(cliCfg),
+		control.WithClientLogger(log))
 
 	netCtx, err := netdetect.Init(context.Background())
 	if err != nil {
@@ -210,6 +222,13 @@ func Start(log *logging.LeveledLogger, cfg *Configuration) error {
 	numaCount := netdetect.NumNumaNodes(netCtx)
 	if numaCount > 0 && len(cfg.Servers) > numaCount {
 		log.Infof("NOTICE: Detected %d NUMA node(s); %d-server config may not perform as expected", numaCount, len(cfg.Servers))
+	}
+
+	// Create a closure to be used for joining ioserver instances.
+	joinInstance := func(ctx context.Context, req *control.SystemJoinReq) (*control.SystemJoinResp, error) {
+		req.SetHostList(cfg.AccessPoints)
+		req.ControlAddr = controlAddr
+		return control.SystemJoin(ctx, rpcClient, req)
 	}
 
 	for idx, srvCfg := range cfg.Servers {
@@ -244,13 +263,7 @@ func Start(log *logging.LeveledLogger, cfg *Configuration) error {
 			return err
 		}
 
-		msClient := newMgmtSvcClient(ctx, log, mgmtSvcClientCfg{
-			AccessPoints:    cfg.AccessPoints,
-			ControlAddr:     controlAddr,
-			TransportConfig: cfg.TransportConfig,
-		})
-
-		srv := NewIOServerInstance(log, bp, scmProvider, msClient, ioserver.NewRunner(log, srvCfg)).
+		srv := NewIOServerInstance(log, bp, scmProvider, joinInstance, ioserver.NewRunner(log, srvCfg)).
 			WithHostFaultDomain(faultDomain)
 		if err := harness.AddInstance(srv); err != nil {
 			return err
@@ -262,26 +275,39 @@ func Start(log *logging.LeveledLogger, cfg *Configuration) error {
 				return err
 			}
 
+			if !sysdb.IsReplica() {
+				continue
+			}
+
 			// Start the system db after instance 0's SCM is
 			// ready.
 			var once sync.Once
 			srv.OnStorageReady(func(ctx context.Context) (err error) {
 				once.Do(func() {
-					err = errors.Wrap(sysdb.Start(ctx, controlAddr),
+					err = errors.Wrap(sysdb.Start(ctx),
 						"failed to start system db",
 					)
 				})
 				return
 			})
+
+			if !sysdb.IsBootstrap() {
+				continue
+			}
+
+			// For historical reasons, we reserve rank 0 for the first
+			// instance on the raft bootstrap server. This implies that
+			// rank 0 will always be associated with a MS replica, but
+			// it is not guaranteed to always be the leader.
+			srv.joinSystem = func(ctx context.Context, req *control.SystemJoinReq) (*control.SystemJoinResp, error) {
+				if sb := srv.getSuperblock(); !sb.ValidRank {
+					srv.log.Debug("marking bootstrap instance as rank 0")
+					req.Rank = 0
+				}
+				return joinInstance(ctx, req)
+			}
 		}
 	}
-
-	// Create rpcClient for inter-server communication.
-	cliCfg := control.DefaultConfig()
-	cliCfg.TransportConfig = cfg.TransportConfig
-	rpcClient := control.NewClient(
-		control.WithConfig(cliCfg),
-		control.WithClientLogger(log))
 
 	// Create and setup control service.
 	controlService := NewControlService(log, harness, bdevProvider, scmProvider, cfg, membership, rpcClient)
@@ -303,12 +329,11 @@ func Start(log *logging.LeveledLogger, cfg *Configuration) error {
 	streamInterceptors := []grpc.StreamServerInterceptor{
 		streamErrorInterceptor,
 	}
-	opts := []grpc.ServerOption{}
 	tcOpt, err := security.ServerOptionForTransportConfig(cfg.TransportConfig)
 	if err != nil {
 		return err
 	}
-	opts = append(opts, tcOpt)
+	srvOpts := []grpc.ServerOption{tcOpt}
 
 	uintOpt, err := unaryInterceptorForTransportConfig(cfg.TransportConfig)
 	if err != nil {
@@ -324,12 +349,12 @@ func Start(log *logging.LeveledLogger, cfg *Configuration) error {
 	if sintOpt != nil {
 		streamInterceptors = append(streamInterceptors, sintOpt)
 	}
-	opts = append(opts, []grpc.ServerOption{
+	srvOpts = append(srvOpts, []grpc.ServerOption{
 		grpc.ChainUnaryInterceptor(unaryInterceptors...),
 		grpc.ChainStreamInterceptor(streamInterceptors...),
 	}...)
 
-	grpcServer := grpc.NewServer(opts...)
+	grpcServer := grpc.NewServer(srvOpts...)
 	ctlpb.RegisterMgmtCtlServer(grpcServer, controlService)
 
 	mgmtSvc.clientNetworkCfg = &ClientNetworkCfg{
@@ -339,6 +364,12 @@ func Start(log *logging.LeveledLogger, cfg *Configuration) error {
 		NetDevClass:     netDevClass,
 	}
 	mgmtpb.RegisterMgmtSvcServer(grpcServer, mgmtSvc)
+
+	tSec, err := security.DialOptionForTransportConfig(cfg.TransportConfig)
+	if err != nil {
+		return err
+	}
+	sysdb.ConfigureTransport(grpcServer, []grpc.DialOption{tSec})
 	sysdb.OnLeadershipGained(func(ctx context.Context) error {
 		log.Infof("MS leader running on %s", hostname())
 		mgmtSvc.startJoinLoop(ctx)

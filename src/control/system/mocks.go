@@ -31,6 +31,7 @@ import (
 
 	"github.com/hashicorp/raft"
 
+	"github.com/daos-stack/daos/src/control/build"
 	"github.com/daos-stack/daos/src/control/common"
 	"github.com/daos-stack/daos/src/control/logging"
 )
@@ -95,6 +96,10 @@ func (mrs *mockRaftService) Apply(cmd []byte, timeout time.Duration) raft.ApplyF
 	return &mockRaftFuture{}
 }
 
+func (mr *mockRaftService) AddVoter(_ raft.ServerID, _ raft.ServerAddress, _ uint64, _ time.Duration) raft.IndexFuture {
+	return &mockRaftFuture{}
+}
+
 func (mrs *mockRaftService) BootstrapCluster(cfg raft.Configuration) raft.Future {
 	return &mockRaftFuture{}
 }
@@ -135,15 +140,34 @@ func newMockRaftService(cfg *mockRaftServiceConfig, fsm raft.FSM) *mockRaftServi
 	}
 }
 
-// MockDatabase returns a lightweight implementation of the system
-// database that does not support raft replication and does all
-// operations in memory.
-func MockDatabase(t *testing.T, log logging.Logger) *Database {
-	db := NewDatabase(log, nil)
-	db.replicaAddr.Addr = &net.TCPAddr{}
+// MockDatabaseWithAddr is similar to MockDatabase but allows a custom
+// replica address to be supplied.
+func MockDatabaseWithAddr(t *testing.T, log logging.Logger, addr *net.TCPAddr) *Database {
+	dbCfg := &DatabaseConfig{
+		Replicas: []string{},
+	}
+	if addr != nil {
+		dbCfg.Replicas = append(dbCfg.Replicas, addr.String())
+	}
+	db, err := NewDatabase(log, dbCfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	db.replicaAddr.Addr = addr
 	db.raft = newMockRaftService(&mockRaftServiceConfig{
 		State: raft.Leader,
 	}, (*fsm)(db))
 
 	return db
+}
+
+// MockDatabase returns a lightweight implementation of the system
+// database that does not support raft replication and does all
+// operations in memory.
+func MockDatabase(t *testing.T, log logging.Logger) *Database {
+	localhost := &net.TCPAddr{
+		IP:   net.IPv4(127, 0, 0, 1),
+		Port: build.DefaultControlPort,
+	}
+	return MockDatabaseWithAddr(t, log, localhost)
 }

@@ -26,10 +26,16 @@ package system
 import (
 	"encoding/json"
 	"io"
+	"path/filepath"
 	"time"
 
+	transport "github.com/Jille/raft-grpc-transport"
 	"github.com/hashicorp/raft"
+	boltdb "github.com/hashicorp/raft-boltdb"
 	"github.com/pkg/errors"
+	"google.golang.org/grpc"
+
+	"github.com/daos-stack/daos/src/control/logging"
 )
 
 // This file contains the "guts" of the new MS database. The basic theory
@@ -53,6 +59,8 @@ const (
 	// raftTimeout sets an upper limit for how long an Apply
 	// operation may take (TODO: tuning required?).
 	raftTimeout = 1 * time.Second
+
+	sysDBFile = "daos_system.db"
 )
 
 type (
@@ -82,6 +90,114 @@ func (ro raftOp) String() string {
 		"updateMember",
 		"removeMember",
 	}[ro]
+}
+
+// configureRaft sets up the raft service.
+func (db *Database) configureRaft() error {
+	if db.raftTransport == nil {
+		return errors.New("no raft transport configured")
+	}
+
+	rc := raft.DefaultConfig()
+	rc.Logger = newHcLogger(db.log)
+	rc.SnapshotThreshold = 16 // arbitrarily low to exercise snapshots
+	//rc.SnapshotInterval = 5 * time.Second
+	rc.HeartbeatTimeout = 250 * time.Millisecond
+	rc.ElectionTimeout = 250 * time.Millisecond
+	rc.LeaderLeaseTimeout = 125 * time.Millisecond
+	rc.LocalID = raft.ServerID(db.serverAddress())
+
+	snaps, err := raft.NewFileSnapshotStoreWithLogger(db.cfg.RaftDir, 2, rc.Logger)
+	if err != nil {
+		return err
+	}
+
+	sysDBPath := filepath.Join(db.cfg.RaftDir, sysDBFile)
+	boltDB, err := boltdb.NewBoltStore(sysDBPath)
+	if err != nil {
+		return err
+	}
+
+	r, err := raft.NewRaft(rc, (*fsm)(db), boltDB, boltDB, snaps, db.raftTransport)
+	if err != nil {
+		return err
+	}
+	db.raft = r
+
+	return nil
+}
+
+// startRaft is responsible for configuring and starting the raft service
+// on this node. If bootstrap is true, then the service will be started
+// in a special bootstrap mode that does not require a quorum.
+func (db *Database) startRaft(shouldBootstrap bool) error {
+	db.log.Debugf("isBootstrap: %t, shouldBootstrap: %t", db.IsBootstrap(), shouldBootstrap)
+
+	if db.IsBootstrap() && shouldBootstrap {
+		// Rank 0 is reserved for the first instance on the bootstrap server.
+		db.data.NextRank = 1
+
+		db.log.Debugf("bootstrapping MS on %s", db.replicaAddr)
+		bsc := raft.Configuration{
+			Servers: []raft.Server{
+				{
+					Suffrage: raft.Voter,
+					ID:       raft.ServerID(db.getReplica().String()),
+					Address:  raft.ServerAddress(db.getReplica().String()),
+				},
+			},
+		}
+		if f := db.raft.BootstrapCluster(bsc); f.Error() != nil {
+			return errors.Wrapf(f.Error(), "failed to bootstrap raft instance on %s", db.getReplica())
+		}
+	}
+
+	return nil
+}
+
+type loggingTransport struct {
+	raft.Transport
+	log logging.Logger
+}
+
+/*
+func (dt *loggingTransport) AppendEntriesPipeline(id raft.ServerID, target raft.ServerAddress) (raft.AppendPipeline, error) {
+	dt.log.Debugf("ApppendEntriesPipeline(%s, %s)", id, target)
+	return dt.Transport.AppendEntriesPipeline(id, target)
+}
+
+func (dt *loggingTransport) AppendEntries(id raft.ServerID, target raft.ServerAddress, args *raft.AppendEntriesRequest, resp *raft.AppendEntriesResponse) error {
+	dt.log.Debugf("ApppendEntries(%s, %s) req: %+v", id, target, args)
+	return dt.Transport.AppendEntries(id, target, args, resp)
+}
+*/
+
+func (dt *loggingTransport) RequestVote(id raft.ServerID, target raft.ServerAddress, args *raft.RequestVoteRequest, resp *raft.RequestVoteResponse) error {
+	dt.log.Debugf("RequestVote(%s, %s) req: %+v", id, target, args)
+	return dt.Transport.RequestVote(id, target, args, resp)
+}
+
+func (dt *loggingTransport) InstallSnapshot(id raft.ServerID, target raft.ServerAddress, args *raft.InstallSnapshotRequest, resp *raft.InstallSnapshotResponse, data io.Reader) error {
+	dt.log.Debugf("InstallSnapshot(%s, %s) req: %+v", id, target, args)
+	return dt.Transport.InstallSnapshot(id, target, args, resp, data)
+}
+
+func (dt *loggingTransport) TimeoutNow(id raft.ServerID, target raft.ServerAddress, args *raft.TimeoutNowRequest, resp *raft.TimeoutNowResponse) error {
+	dt.log.Debugf("TimeoutNow(%s, %s) req: %+v", id, target, args)
+	return dt.Transport.TimeoutNow(id, target, args, resp)
+}
+
+func (db *Database) ConfigureTransport(srv *grpc.Server, dialOpts []grpc.DialOption) {
+	tm := transport.New(db.serverAddress(), dialOpts)
+	tm.Register(srv)
+	db.raftTransport = &loggingTransport{
+		Transport: tm.Transport(),
+		log:       db.log,
+	}
+}
+
+func (db *Database) serverAddress() raft.ServerAddress {
+	return raft.ServerAddress(db.getReplica().String())
 }
 
 // createRaftUpdate serializes the inner payload and then wraps
@@ -244,21 +360,21 @@ func (f *fsm) Snapshot() (raft.FSMSnapshot, error) {
 
 // Restore is called to force the FSM to read in a snapshot, discarding any previous state.
 func (f *fsm) Restore(rc io.ReadCloser) error {
-	data := NewDatabase(nil, nil).data
-	if err := json.NewDecoder(rc).Decode(data); err != nil {
+	db, _ := NewDatabase(nil, nil)
+	if err := json.NewDecoder(rc).Decode(db.data); err != nil {
 		return err
 	}
 
-	if data.SchemaVersion != CurrentSchemaVersion {
+	if db.data.SchemaVersion != CurrentSchemaVersion {
 		return errors.Errorf("restored schema version %d != %d",
-			data.SchemaVersion, CurrentSchemaVersion)
+			db.data.SchemaVersion, CurrentSchemaVersion)
 	}
 
-	f.data.Members = data.Members
-	f.data.Pools = data.Pools
-	f.data.NextRank = data.NextRank
-	f.data.MapVersion = data.MapVersion
-	f.log.Debugf("db snapshot loaded (map version %d)", data.MapVersion)
+	f.data.Members = db.data.Members
+	f.data.Pools = db.data.Pools
+	f.data.NextRank = db.data.NextRank
+	f.data.MapVersion = db.data.MapVersion
+	f.log.Debugf("db snapshot loaded (map version %d)", db.data.MapVersion)
 	return nil
 }
 

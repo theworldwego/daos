@@ -446,8 +446,7 @@ func (c *Configuration) Validate(log logging.Logger) (err error) {
 		return FaultConfigNoProvider
 	}
 
-	// only single access point valid for now
-	if len(c.AccessPoints) != 1 {
+	if len(c.AccessPoints) < 1 {
 		return FaultConfigBadAccessPoints
 	}
 	for i := range c.AccessPoints {

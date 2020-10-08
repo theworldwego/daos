@@ -24,8 +24,6 @@
 package server
 
 import (
-	"context"
-	"net"
 	"sync"
 	"testing"
 	"time"
@@ -174,10 +172,9 @@ func newTestIOServer(log logging.Logger, isAP bool, ioCfg ...*ioserver.Config) *
 		msCfg.AccessPoints = append(msCfg.AccessPoints, "localhost")
 	}
 
-	srv := NewIOServerInstance(log, nil, nil, newMgmtSvcClient(context.TODO(), log, msCfg), r)
+	srv := NewIOServerInstance(log, nil, nil, nil, r)
 	srv.setSuperblock(&Superblock{
 		Rank: system.NewRankPtr(0),
-		MS:   isAP,
 	})
 	srv.ready.SetTrue()
 
@@ -221,13 +218,6 @@ func newTestMgmtSvcMulti(t *testing.T, log logging.Logger, count int, isAP bool)
 // fail if operations expect it to be a replica.
 func newTestMgmtSvcNonReplica(t *testing.T, log logging.Logger) *mgmtSvc {
 	svc := newTestMgmtSvc(t, log)
-
-	// Doesn't actually start anything, just clears the replica.
-	ctx, cancel := context.WithCancel(context.Background())
-	if err := svc.sysdb.Start(ctx, &net.TCPAddr{}); err != nil {
-		t.Fatal(err)
-	}
-	cancel()
-
+	svc.sysdb = system.MockDatabaseWithAddr(t, log, nil)
 	return svc
 }

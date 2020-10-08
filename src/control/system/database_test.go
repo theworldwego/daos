@@ -47,10 +47,14 @@ import (
 func setupTestDatabase(t *testing.T, log logging.Logger, replicas []string) (*Database, func()) {
 	testDir, cleanup := common.CreateTestDir(t)
 
-	db := NewDatabase(log, &DatabaseConfig{
-		RaftDir:  testDir + "/raft",
-		Replicas: replicas,
+	db, err := NewDatabase(log, &DatabaseConfig{
+		LocalAddr: common.LocalhostCtrlAddr(),
+		RaftDir:   testDir + "/raft",
+		Replicas:  replicas,
 	})
+	if err != nil {
+		t.Fatal(err)
+	}
 	return db, cleanup
 }
 
@@ -63,7 +67,11 @@ func waitForLeadership(t *testing.T, ctx context.Context, db *Database, gained b
 			t.Fatal(ctx.Err())
 			return
 		case <-timer.C:
-			t.Fatal("leadership state did not change before timeout")
+			state := "gained"
+			if !gained {
+				state = "lost"
+			}
+			t.Fatalf("leadership was not %s before timeout", state)
 			return
 		default:
 			if db.IsLeader() == gained {
@@ -152,7 +160,8 @@ func TestSystem_Database_checkReplica(t *testing.T) {
 
 func TestSystem_Database_Cancel(t *testing.T) {
 	localhost := &net.TCPAddr{
-		IP: net.IPv4(127, 0, 0, 1),
+		IP:   net.IPv4(127, 0, 0, 1),
+		Port: build.DefaultControlPort,
 	}
 
 	log, buf := logging.NewTestLogger(t.Name())
@@ -164,7 +173,8 @@ func TestSystem_Database_Cancel(t *testing.T) {
 
 	db, cleanup := setupTestDatabase(t, log, []string{localhost.String()})
 	defer cleanup()
-	if err := db.Start(dbCtx, localhost); err != nil {
+	_, db.raftTransport = raft.NewInmemTransport(raft.ServerAddress(db.replicaAddr.String()))
+	if err := db.Start(dbCtx); err != nil {
 		t.Fatal(err)
 	}
 
