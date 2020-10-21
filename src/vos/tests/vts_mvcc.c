@@ -1389,7 +1389,7 @@ uncertainty_check_exec_one(struct io_test_args *arg, int i, int j,
 	struct tx_helper	 txh2 = {0};
 	struct tx_helper	*wtx = &txh1;
 	struct tx_helper	*atx = &txh2;
-	int			 expected_arc;
+	int			 expected_arc = 0;
 	int			 nfailed = 0;
 	int			 rc;
 
@@ -1543,17 +1543,19 @@ uncertainty_check(void **state)
 
 			nfailed += uncertainty_check_exec(arg, i, w, a, &ntot,
 							  &nskipped);
-			/* TODO: Enable once vos is ready. */
-			nfailed = 0;
 			assert_true(!mvcc_arg->fail_fast || nfailed == 0);
 			i++;
 		}
 	}
 
-	print_message("total tests: %d, skipped %d\n", ntot, nskipped);
+	print_message("total tests: %d, failed %d, skipped %d\n", ntot,
+		      nfailed, nskipped);
 
-	if (nfailed > 0)
-		fail_msg("%d failed cases", nfailed);
+	/* TODO: enable it once VOS is fully ready
+	 *
+	 * if (nfailed > 0)
+	 *	fail_msg("%d failed cases", nfailed);
+	 */
 }
 
 static const struct CMUnitTest mvcc_tests[] = {

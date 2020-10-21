@@ -83,6 +83,7 @@ struct vos_object {
  * \param epr		[IN,OUT]	Epoch range.   High epoch should be set
  *					to requested epoch.   The lower epoch
  *					can be 0 or bounded.
+ * \param bound		[IN]		Epoch uncertainty bound
  * \param no_create	[IN]		If object doesn't exist, do not create
  * \param intent	[IN]		The request intent.
  * \param visible_only	[IN]		Return the object only if it's visible
@@ -99,9 +100,9 @@ struct vos_object {
  */
 int
 vos_obj_hold(struct daos_lru_cache *occ, struct vos_container *cont,
-	     daos_unit_oid_t oid, daos_epoch_range_t *epr, bool no_create,
-	     uint32_t intent, bool visible_only, struct vos_object **obj_p,
-	     struct vos_ts_set *ts_set);
+	     daos_unit_oid_t oid, daos_epoch_range_t *epr, daos_epoch_t bound,
+	     bool no_create, uint32_t intent, bool visible_only,
+	     struct vos_object **obj_p, struct vos_ts_set *ts_set);
 
 /**
  * Release the object cache reference.
@@ -213,8 +214,9 @@ vos_oi_find(struct vos_container *cont, daos_unit_oid_t oid,
  */
 int
 vos_oi_punch(struct vos_container *cont, daos_unit_oid_t oid,
-	     daos_epoch_t epoch, uint64_t flags, struct vos_obj_df *obj,
-	     struct vos_ilog_info *info, struct vos_ts_set *ts_set);
+	     daos_epoch_t epoch, daos_epoch_t bound, uint64_t flags,
+	     struct vos_obj_df *obj, struct vos_ilog_info *info,
+	     struct vos_ts_set *ts_set);
 
 
 /** delete an object from OI table */

@@ -762,7 +762,7 @@ hold_objects(struct vos_object **objs, struct daos_lru_cache *occ,
 	daos_epoch_range_t	epr = {0, 1};
 
 	for (i = start; i < end; i++) {
-		rc = vos_obj_hold(occ, vos_hdl2cont(*coh), *oid, &epr,
+		rc = vos_obj_hold(occ, vos_hdl2cont(*coh), *oid, &epr, 0,
 				  no_create, no_create ? DAOS_INTENT_DEFAULT :
 				  DAOS_INTENT_UPDATE, true, &objs[i], 0);
 		if (rc != exp_rc)
@@ -830,11 +830,11 @@ io_obj_cache_test(void **state)
 	oids[1] = gen_oid(arg->ofeat);
 
 	rc = vos_obj_hold(occ, vos_hdl2cont(ctx->tc_co_hdl), oids[0], &epr,
-			  false, DAOS_INTENT_DEFAULT, true, &objs[0], 0);
+			  0, false, DAOS_INTENT_DEFAULT, true, &objs[0], 0);
 	assert_int_equal(rc, 0);
 	vos_obj_release(occ, objs[0], false);
 
-	rc = vos_obj_hold(occ, vos_hdl2cont(l_coh), oids[1], &epr, false,
+	rc = vos_obj_hold(occ, vos_hdl2cont(l_coh), oids[1], &epr, 0, false,
 			  DAOS_INTENT_DEFAULT, true, &objs[0], 0);
 	assert_int_equal(rc, 0);
 	vos_obj_release(occ, objs[0], false);
@@ -848,7 +848,7 @@ io_obj_cache_test(void **state)
 
 	rc = hold_objects(objs, occ, &l_coh, &oids[1], 10, 15, true, 0);
 	assert_int_equal(rc, 0);
-	rc = vos_obj_hold(occ, vos_hdl2cont(l_coh), oids[1], &epr, true,
+	rc = vos_obj_hold(occ, vos_hdl2cont(l_coh), oids[1], &epr, 0, true,
 			  DAOS_INTENT_DEFAULT, true, &objs[16], 0);
 	assert_int_equal(rc, 0);
 

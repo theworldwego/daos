@@ -1987,7 +1987,7 @@ vos_dtx_check_sync(daos_handle_t coh, daos_unit_oid_t oid, daos_epoch_t *epoch)
 	 * care about whether it is for punch or update, use
 	 * DAOS_INTENT_COS to bypass DTX conflict check.
 	 */
-	rc = vos_obj_hold(occ, cont, oid, &epr, true,
+	rc = vos_obj_hold(occ, cont, oid, &epr, 0, true,
 			  DAOS_INTENT_COS, true, &obj, 0);
 	if (rc != 0) {
 		D_ERROR(DF_UOID" fail to check sync: rc = "DF_RC"\n",
@@ -2011,7 +2011,7 @@ vos_dtx_mark_sync(daos_handle_t coh, daos_unit_oid_t oid, daos_epoch_t epoch)
 
 	cont = vos_hdl2cont(coh);
 	occ = vos_obj_cache_current();
-	rc = vos_obj_hold(occ, cont, oid, &epr, true,
+	rc = vos_obj_hold(occ, cont, oid, &epr, 0, true,
 			  DAOS_INTENT_DEFAULT, true, &obj, 0);
 	if (rc != 0) {
 		D_ERROR(DF_UOID" fail to mark sync: rc = "DF_RC"\n",

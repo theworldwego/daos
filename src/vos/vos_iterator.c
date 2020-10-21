@@ -237,10 +237,13 @@ vos_iter_prepare(vos_iter_type_t type, vos_iter_param_t *param,
 	if (rc != 0)
 		goto out;
 
-
+	if (dtx_is_valid_handle(dth))
+		vos_dth_set(dth);
 	D_DEBUG(DB_TRACE, "Preparing standalone iterator of type %s\n",
 		dict->id_name);
 	rc = dict->id_ops->iop_prepare(type, param, &iter, ts_set);
+	if (dtx_is_valid_handle(dth))
+		vos_dth_set(NULL);
 	if (rc != 0) {
 		if (rc == -DER_NONEXIST)
 			D_DEBUG(DB_TRACE, "No %s to iterate: "DF_RC"\n",

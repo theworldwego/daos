@@ -216,9 +216,9 @@ vos_obj_release(struct daos_lru_cache *occ, struct vos_object *obj, bool evict)
 
 int
 vos_obj_hold(struct daos_lru_cache *occ, struct vos_container *cont,
-	     daos_unit_oid_t oid, daos_epoch_range_t *epr, bool no_create,
-	     uint32_t intent, bool visible_only, struct vos_object **obj_p,
-	     struct vos_ts_set *ts_set)
+	     daos_unit_oid_t oid, daos_epoch_range_t *epr, daos_epoch_t bound,
+	     bool no_create, uint32_t intent, bool visible_only,
+	     struct vos_object **obj_p, struct vos_ts_set *ts_set)
 {
 	struct vos_object	*obj;
 	struct daos_llink	*lret;
@@ -309,7 +309,7 @@ check_object:
 	if (no_create) {
 		rc = vos_ilog_fetch(vos_cont2umm(cont), vos_cont2hdl(cont),
 				    intent, &obj->obj_df->vo_ilog, epr->epr_hi,
-				    0, NULL, &obj->obj_ilog_info);
+				    bound, NULL, NULL, &obj->obj_ilog_info);
 		if (rc != 0) {
 			D_DEBUG(DB_TRACE, "Object "DF_UOID" not found at "
 				DF_U64"\n", DP_UOID(oid), epr->epr_hi);
@@ -322,7 +322,12 @@ check_object:
 			D_DEBUG(DB_TRACE, "Object "DF_UOID" not visible at "
 				DF_U64"-"DF_U64"\n", DP_UOID(oid), epr->epr_lo,
 				epr->epr_hi);
-			goto failed;
+			if (!obj->obj_ilog_info.ii_uncertain_create)
+				goto failed;
+			/** If the creation is uncertain, go ahead and fall
+			 *  through as if the object exists so we can do
+			 *  actual uncertainty check.
+			 */
 		}
 		goto out;
 	}
@@ -332,8 +337,10 @@ check_object:
 	 */
 	if (ts_set && ts_set->ts_flags & VOS_COND_UPDATE_OP_MASK)
 		cond_mask = VOS_ILOG_COND_UPDATE;
-	rc = vos_ilog_update(cont, &obj->obj_df->vo_ilog, epr,
-			     NULL, &obj->obj_ilog_info, cond_mask, ts_set);
+	rc = vos_ilog_update(cont, &obj->obj_df->vo_ilog, epr, bound, NULL,
+			     &obj->obj_ilog_info, cond_mask, ts_set);
+	if (rc == -DER_TX_RESTART)
+		goto failed;
 	if (rc == -DER_NONEXIST && cond_mask)
 		goto out;
 	if (rc != 0) {

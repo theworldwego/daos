@@ -161,6 +161,8 @@ enum {
 #define VOS_TS_PER_LEVEL	2
 
 struct vos_ts_table {
+	/** Cached high write timestamp */
+	daos_epoch_t		tt_ts_w;
 	/** Global read low timestamp for type */
 	daos_epoch_t		tt_ts_rl;
 	/** Global read high timestamp for type */
