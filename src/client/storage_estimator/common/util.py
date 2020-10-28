@@ -139,12 +139,22 @@ class ProcessBase(CommonBase):
         self._meta = self._get_vos_meta(args)
         self._process_block_values()
         self._process_checksum()
+        self._process_ec()
 
     def get_io_size(self):
         return self._io_size
 
     def get_chunk_size(self):
         return self._chunk_size
+
+    def get_parity(self):
+        return self._parity
+
+    def get_stripe_size(self):
+        return self._stripe_size
+
+    def get_cells(self):
+        return self._cells
 
     def _parse_num_value(self, key_value, default_value):
         op = vars(self._args)
@@ -179,6 +189,27 @@ class ProcessBase(CommonBase):
                 'using checksum "{0}" algorithm of size {1} bytes'.format(
                     csum_name, csum_size))
             self._csum_size = csum_size
+
+    def _process_ec(self):
+        self._parity = 0
+        self._cells = 16
+        self._stripe_size = self._parse_num_value('stripe_size', '1MiB')
+
+        if 'parity' in self._args and self._args.parity:
+            parity = self._args.parity
+
+            if parity > 2:
+                raise ValueError('invalid parity value')
+
+            self._parity = self._args.parity
+            self._cells = self._args.cells
+
+            if self._stripe_size % self._cells:
+                raise ValueError('stripe_size must be multiple of cells')
+
+            self._debug('using EC parity {0}'.format(self._parity))
+            self._debug('using EC cells {0}'.format(self._cells))
+            self._debug('using EC stripe size {0}'.format(self._stripe_size))
 
     def _process_block_values(self):
         scm_cutoff = self._process_scm_cutoff()
@@ -218,6 +249,7 @@ class ProcessBase(CommonBase):
         container.add_value(dfs_sb)
         container.set_csum_size(self._csum_size)
         container.set_csum_gran(self._chunk_size)
+
         containers = Containers()
         containers.add_value(container)
         containers.set_num_shards(self._args.num_shards)

@@ -54,6 +54,9 @@ class ProcessFS(ProcessBase):
         fse.set_io_size(self.get_io_size())
         fse.set_chunk_size(self.get_chunk_size())
         fse.set_dfs_inode(inode_akey)
+        fse.set_cells(self.get_cells())
+        fse.set_parity(self.get_parity())
+        fse.set_stripe_size(self.get_stripe_size())
         fse.explore()
         fse.print_stats()
 
@@ -190,6 +193,24 @@ explore.add_argument(
     help='[optional] Checksum algorithm to be used crc16, crc32, crc64, sha1, sha256, sha512',
     default='')
 explore.add_argument(
+    '-l',
+    '--cells',
+    type=int,
+    help='number of cells for erasure coded',
+    default=16)
+explore.add_argument(
+    '-p',
+    '--parity',
+    type=int,
+    help='[optional] parity 1 or 2, 0 = disabled',
+    default=0)
+explore.add_argument(
+    '-q',
+    '--stripe_size',
+    type=str,
+    help='Stripe size',
+    default='1MiB')
+explore.add_argument(
     '-m',
     '--meta',
     metavar='META',
@@ -289,6 +310,24 @@ csv_file.add_argument(
     help='Explain what is being done')
 csv_file.add_argument('-a', '--alloc_overhead', type=int,
                       help='Vos alloc overhead', default=16)
+csv_file.add_argument(
+    '-l',
+    '--cells',
+    type=int,
+    help='number of cells for erasure coded',
+    default=16)
+csv_file.add_argument(
+    '-p',
+    '--parity',
+    type=int,
+    help='[optional] parity 1 or 2, 0 = disabled',
+    default=0)
+csv_file.add_argument(
+    '-q',
+    '--stripe_size',
+    type=str,
+    help='Stripe size',
+    default='1MiB')
 csv_file.add_argument(
     '-m',
     '--meta',
