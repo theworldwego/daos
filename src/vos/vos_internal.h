@@ -297,7 +297,8 @@ struct vos_dtx_cmt_ent {
 	d_list_t			 dce_committed_link;
 	struct vos_dtx_cmt_ent_df	 dce_base;
 	uint32_t			 dce_reindex:1,
-					 dce_exist:1;
+					 dce_exist:1,
+					 dce_rdonly:1;
 };
 
 #define DCE_XID(dce)		((dce)->dce_base.dce_xid)
