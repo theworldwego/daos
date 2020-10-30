@@ -53,6 +53,7 @@ enum dc_tx_status {
 	TX_COMMITTED,
 	TX_ABORTED,	/**< no more new TX generations */
 	TX_FAILED,	/**< may restart a new TX generation */
+	TX_RESTARTING,
 };
 
 /*
@@ -118,6 +119,8 @@ struct dc_tx {
 	struct daos_cpd_sg	 tx_reqs;
 	struct daos_cpd_sg	 tx_disp;
 	struct daos_cpd_sg	 tx_tgts;
+
+	struct d_backoff_seq	 tx_backoff_seq;
 };
 
 static int
@@ -221,6 +224,8 @@ dc_tx_free(struct d_hlink *hlink)
 	D_ASSERT(daos_hhash_link_empty(&tx->tx_hlink));
 	D_ASSERT(tx->tx_read_cnt == 0);
 	D_ASSERT(tx->tx_write_cnt == 0);
+
+	d_backoff_seq_fini(&tx->tx_backoff_seq);
 
 	if (tx->tx_epoch_task != NULL)
 		tse_task_decref(tx->tx_epoch_task);
@@ -337,6 +342,24 @@ dc_tx_alloc(daos_handle_t coh, daos_epoch_t epoch, uint64_t flags,
 	tx->tx_status = TX_OPEN;
 	daos_hhash_hlink_init(&tx->tx_hlink, &tx_h_ops);
 	dc_tx_hdl_link(tx);
+
+	/*
+	 * Initialize the restart backoff sequence to produce:
+	 *
+	 *   Restart	Range
+	 *         1	[0,   0 us]
+	 *         2	[0,  16 us]
+	 *         3	[0,  64 us]
+	 *         4	[0, 128 us]
+	 *       ...	...
+	 *        10	[0,  ~1  s]
+	 *        11	[0,  ~1  s]
+	 *       ...	...
+	 */
+	rc = d_backoff_seq_init(&tx->tx_backoff_seq, 1 /* nzeros */,
+				4 /* factor */, 16 /* next (us) */,
+				1 << 20 /* max (us) */);
+	D_ASSERTF(rc == 0, "d_backoff_seq_init: "DF_RC"\n", DP_RC(rc));
 
 	*ptx = tx;
 
@@ -1891,6 +1914,26 @@ out_task:
 	return rc;
 }
 
+static void
+dc_tx_restart_reopen(struct dc_tx *tx)
+{
+	tx->tx_status = TX_OPEN;
+	tx->tx_epoch.oe_value = 0;
+}
+
+static int
+dc_tx_restart_reopen_task(tse_task_t *task)
+{
+	struct dc_tx *tx = tse_task_get_priv(task);
+
+	D_MUTEX_LOCK(&tx->tx_lock);
+	D_ASSERTF(tx->tx_status == TX_RESTARTING, "%d\n", tx->tx_status);
+	dc_tx_restart_reopen(tx);
+	D_MUTEX_UNLOCK(&tx->tx_lock);
+	tse_task_complete(task, 0);
+	return 0;
+}
+
 /**
  * Restart a transaction that has encountered a -DER_TX_RESTART. This shall not
  * be used to restart a transaction created by dc_tx_open_snap or
@@ -1917,13 +1960,44 @@ dc_tx_restart(tse_task_t *task)
 			tx->tx_status);
 		rc = -DER_NO_PERM;
 	} else {
+		uint32_t backoff;
+
 		dc_tx_cleanup(tx);
 
-		tx->tx_status = TX_OPEN;
-		tx->tx_epoch.oe_value = 0;
 		if (tx->tx_epoch_task != NULL) {
 			tse_task_decref(tx->tx_epoch_task);
 			tx->tx_epoch_task = NULL;
+		}
+
+		backoff = d_backoff_seq_next(&tx->tx_backoff_seq);
+		if (backoff == 0) {
+			/* No child task is required; reopen the TX now. */
+			dc_tx_restart_reopen(tx);
+		} else {
+			tse_task_t *child;
+
+			/*
+			 * Schedule a delayed child task to implement the
+			 * backoff.
+			 */
+			rc = tse_task_create(dc_tx_restart_reopen_task,
+					     tse_task2sched(task), tx, &child);
+			if (rc != 0)
+				goto out_task;
+			rc = tse_task_register_deps(task, 1, &child);
+			if (rc != 0) {
+				tse_task_decref(task);
+				goto out_task;
+			}
+			tse_task_schedule_with_delay(child, false /* instant */,
+						     backoff);
+			/*
+			 * Prevent others from restarting the same TX while
+			 * tx_lock is temporarily released during the backoff.
+			 */
+			tx->tx_status = TX_RESTARTING;
+			D_MUTEX_UNLOCK(&tx->tx_lock);
+			goto out;
 		}
 	}
 	D_MUTEX_UNLOCK(&tx->tx_lock);
@@ -1934,6 +2008,7 @@ dc_tx_restart(tse_task_t *task)
 out_task:
 	tse_task_complete(task, rc);
 
+out:
 	return rc;
 }
 
