@@ -1873,7 +1873,7 @@ ds_obj_rw_handler(crt_rpc_t *rpc)
 
 		if (orw->orw_flags & ORF_CSUM_REPORT) {
 			obj_log_csum_err();
-			D_GOTO(out, rc = -DER_CSUM);
+			D_GOTO(out, rc = 0);
 		}
 
 		epoch.oe_value = orw->orw_epoch;
