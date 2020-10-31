@@ -57,7 +57,7 @@ obj_verify_bio_csum(daos_obj_id_t oid, daos_iod_t *iods,
  * NOT contains the original leader information.
  */
 static int
-obj_gen_dtx_mbs(struct daos_shard_tgt *tgts, uint32_t *tgt_cnt,
+obj_gen_dtx_mbs(struct daos_shard_tgt *tgts, bool is_ec, uint32_t *tgt_cnt,
 		struct dtx_memberships **p_mbs)
 {
 	struct dtx_memberships	*mbs;
@@ -86,7 +86,8 @@ obj_gen_dtx_mbs(struct daos_shard_tgt *tgts, uint32_t *tgt_cnt,
 		mbs->dm_tgt_cnt = j;
 		mbs->dm_grp_cnt = 1;
 		mbs->dm_data_size = size;
-		mbs->dm_flags = DMF_MODIFY_SRDG;
+		if (!is_ec)
+			mbs->dm_flags = DMF_SRDG_REP;
 	}
 
 	*p_mbs = mbs;
@@ -1180,6 +1181,7 @@ obj_local_rw(crt_rpc_t *rpc, struct obj_io_context *ioc,
 
 	D_TIME_START(time_start, OBJ_PF_UPDATE_LOCAL);
 
+again:
 	create_map = orw->orw_flags & ORF_CREATE_MAP;
 
 	iods = split_iods == NULL ? orw->orw_iod_array.oia_iods : split_iods;
@@ -1286,7 +1288,8 @@ obj_local_rw(crt_rpc_t *rpc, struct obj_io_context *ioc,
 				     dth);
 		daos_recx_ep_list_free(shadows, orw->orw_nr);
 		if (rc) {
-			D_CDEBUG(rc == -DER_INPROGRESS || rc == -DER_NONEXIST,
+			D_CDEBUG(rc == -DER_INPROGRESS || rc == -DER_NONEXIST ||
+				 rc == -DER_TX_UNCERTAINTY,
 				 DB_IO, DLOG_ERR,
 				 "Fetch begin for "DF_UOID" failed: "DF_RC"\n",
 				 DP_UOID(orw->orw_oid), DP_RC(rc));
@@ -1422,6 +1425,12 @@ out:
 	}
 
 	rc = obj_rw_complete(rpc, ioc->ioc_map_ver, ioh, rc, dth);
+	if (rc == -DER_TX_UNCERTAINTY) {
+		rc = dtx_refresh(dth, ioc->ioc_coc);
+		if (rc == -DER_AGAIN)
+			goto again;
+	}
+
 	D_TIME_END(time_start, OBJ_PF_UPDATE_LOCAL);
 	return rc;
 }
@@ -1716,7 +1725,8 @@ ds_obj_tgt_update_handler(crt_rpc_t *rpc)
 	tgt_cnt = orw->orw_shard_tgts.ca_count;
 
 	if (!daos_is_zero_dti(&orw->orw_dti) && tgt_cnt != 0) {
-		rc = obj_gen_dtx_mbs(tgts, &tgt_cnt, &mbs);
+		rc = obj_gen_dtx_mbs(tgts, orw->orw_flags & ORF_EC,
+				     &tgt_cnt, &mbs);
 		if (rc != 0)
 			D_GOTO(out, rc);
 	}
@@ -1933,7 +1943,8 @@ re_fetch:
 	tgt_cnt = orw->orw_shard_tgts.ca_count;
 
 	if (!daos_is_zero_dti(&orw->orw_dti) && tgt_cnt != 0) {
-		rc = obj_gen_dtx_mbs(tgts, &tgt_cnt, &mbs);
+		rc = obj_gen_dtx_mbs(tgts, orw->orw_flags & ORF_EC,
+				     &tgt_cnt, &mbs);
 		if (rc != 0)
 			D_GOTO(out, rc);
 	}
@@ -2503,6 +2514,7 @@ obj_local_punch(struct obj_punch_in *opi, crt_opcode_t opc,
 		dth = NULL;
 	}
 
+again:
 	rc = dtx_sub_init(dth, &opi->opi_oid, opi->opi_dkey_hash);
 	if (rc != 0)
 		goto out;
@@ -2536,6 +2548,13 @@ obj_local_punch(struct obj_punch_in *opi, crt_opcode_t opc,
 		D_ERROR("opc %#x not supported\n", opc);
 		D_GOTO(out, rc = -DER_NOSYS);
 	}
+
+	if (rc == -DER_TX_UNCERTAINTY) {
+		rc = dtx_refresh(dth, ioc->ioc_coc);
+		if (rc == -DER_AGAIN)
+			goto again;
+	}
+
 out:
 	return rc;
 }
@@ -2588,7 +2607,8 @@ ds_obj_tgt_punch_handler(crt_rpc_t *rpc)
 	tgt_cnt = opi->opi_shard_tgts.ca_count;
 
 	if (!daos_is_zero_dti(&opi->opi_dti) && tgt_cnt != 0) {
-		rc = obj_gen_dtx_mbs(tgts, &tgt_cnt, &mbs);
+		rc = obj_gen_dtx_mbs(tgts, opi->opi_flags & ORF_EC,
+				     &tgt_cnt, &mbs);
 		if (rc != 0)
 			D_GOTO(out, rc);
 	}
@@ -2758,7 +2778,8 @@ ds_obj_punch_handler(crt_rpc_t *rpc)
 	tgt_cnt = opi->opi_shard_tgts.ca_count;
 
 	if (!daos_is_zero_dti(&opi->opi_dti) && tgt_cnt != 0) {
-		rc = obj_gen_dtx_mbs(tgts, &tgt_cnt, &mbs);
+		rc = obj_gen_dtx_mbs(tgts, opi->opi_flags & ORF_EC,
+				     &tgt_cnt, &mbs);
 		if (rc != 0)
 			D_GOTO(out, rc);
 	}
@@ -3571,7 +3592,14 @@ ds_obj_dtx_follower(crt_rpc_t *rpc, struct obj_io_context *ioc)
 	if (rc != 0)
 		goto out;
 
+again:
 	rc = ds_obj_dtx_handle_one(rpc, dcsh, dcde, dcsr, ioc, &dth);
+	if (rc == -DER_TX_UNCERTAINTY) {
+		rc = dtx_refresh(&dth, ioc->ioc_coc);
+		if (rc == -DER_AGAIN)
+			goto again;
+	}
+
 	rc = dtx_end(&dth, ioc->ioc_coc, rc);
 
 out:
@@ -3594,6 +3622,7 @@ obj_obj_dtx_leader(struct dtx_leader_handle *dlh, void *arg, int idx,
 	if (idx == -1) {
 		if (!(exec_arg->flags & ORF_RESEND)) {
 			struct daos_cpd_disp_ent	*dcde;
+			struct obj_io_context		*ioc = dca->dca_ioc;
 
 			dcde = ds_obj_cpd_get_dcde(dca->dca_rpc,
 						   dca->dca_idx, 0);
@@ -3601,8 +3630,7 @@ obj_obj_dtx_leader(struct dtx_leader_handle *dlh, void *arg, int idx,
 			 * the CPD RPC. Here, only need to check the write capa.
 			 */
 			if (dcde->dcde_write_cnt != 0) {
-				rc = obj_capa_check(dca->dca_ioc->ioc_coh,
-						    true);
+				rc = obj_capa_check(ioc->ioc_coh, true);
 				if (rc != 0) {
 					comp_cb(dlh, idx, rc);
 
@@ -3610,11 +3638,18 @@ obj_obj_dtx_leader(struct dtx_leader_handle *dlh, void *arg, int idx,
 				}
 			}
 
+again:
 			rc = ds_obj_dtx_handle_one(dca->dca_rpc,
 				ds_obj_cpd_get_dcsh(dca->dca_rpc, dca->dca_idx),
 				dcde,
 				ds_obj_cpd_get_dcsr(dca->dca_rpc, dca->dca_idx),
-				dca->dca_ioc, &dlh->dlh_handle);
+				ioc, &dlh->dlh_handle);
+			if (rc == -DER_TX_UNCERTAINTY) {
+				rc = dtx_refresh(&dlh->dlh_handle,
+						 ioc->ioc_coc);
+				if (rc == -DER_AGAIN)
+					goto again;
+			}
 		}
 
 		if (comp_cb != NULL)
@@ -3780,17 +3815,12 @@ ds_obj_dtx_leader_ult(void *arg)
 	else
 		tgts++;
 
-	/* For distributed transaction, ask DTX  to 'sync' commit. For single
-	 * RDG based modification (with the dm_flag DMF_MODIFY_SRDG), we will
-	 * consider 'async' mode when batched commit is ready for distributed
-	 * transaction.
-	 */
 	rc = dtx_leader_begin(dca->dca_ioc->ioc_coc, &dcsh->dcsh_xid,
 			      &dcsh->dcsh_epoch, dcde->dcde_write_cnt,
 			      oci->oci_map_ver, &dcsh->dcsh_leader_oid, NULL,
 			      0, tgts, tgt_cnt - 1,
 			      (tgt_cnt > 1 || dcde->dcde_write_cnt > 1) ?
-			      false : true, true, dcsh->dcsh_mbs, &dlh);
+			      false : true, false, dcsh->dcsh_mbs, &dlh);
 	if (rc != 0)
 		goto out;
 
