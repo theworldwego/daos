@@ -1017,11 +1017,9 @@ static struct op operations[] = {
 	{"listd",	T_R,	L_O,	L_NIL,	R_R,	W_NIL,	listd_f},
 	{"lista",	T_R,	L_D,	L_NIL,	R_R,	W_NIL,	lista_f},
 	{"listr",	T_R,	L_A,	L_NIL,	R_R,	W_NIL,	listr_f},
-	/* Check existence */
 	{"checkexisto",	T_R,	L_O,	L_NIL,	R_NE,	W_NIL,	checkexisto_f},
 	{"checkexistd",	T_R,	L_D,	L_NIL,	R_NE,	W_NIL,	checkexistd_f},
 	{"checkexista",	T_R,	L_A,	L_NIL,	R_NE,	W_NIL,	checkexista_f},
-	/* VOS Query key */
 	{"querymaxd",	T_R,	L_O,	L_NIL,	R_NE,	W_NIL,	querymaxd_f},
 	{"querymaxa",	T_R,	L_D,	L_NIL,	R_NE,	W_NIL,	querymaxa_f},
 	{"querymaxr",	T_R,	L_A,	L_NIL,	R_NE,	W_NIL,	querymaxr_f},
@@ -1036,6 +1034,7 @@ static struct op operations[] = {
 	{"querymindr",	T_R,	L_O,	L_NIL,	R_NE,	W_NIL,	querymindr_f},
 	{"queryminar",	T_R,	L_D,	L_NIL,	R_NE,	W_NIL,	queryminar_f},
 	{"querymindar",	T_R,	L_O,	L_NIL,	R_NE,	W_NIL,	querymindar_f},
+
 	/* Read timestamp updates */
 	{"read_ts_o",	T_RTU,	L_O,	L_NIL,	R_R,	W_NIL,	read_ts_o_f},
 	{"read_ts_d",	T_RTU,	L_D,	L_NIL,	R_R,	W_NIL,	read_ts_d_f},
@@ -1059,7 +1058,14 @@ static struct op operations[] = {
 	{"punchd_dne",	T_RW,	L_D,	L_D,	R_NE,	W_E,	punchd_dne_f},
 	{"puncha_ane",	T_RW,	L_A,	L_A,	R_NE,	W_E,	puncha_ane_f},
 
-	/* Writes */
+	/*
+	 * Writes
+	 *
+	 * Note that due to punch propogation, regular punches actually involve
+	 * one or more reads. These reads can only be determined at run time.
+	 * We are not verifying their side effects right now---failures caused
+	 * by them are simply ignored.
+	 */
 	{"update",	T_W,	L_NIL,	L_A,	R_NIL,	W_NE,	update_f},
 	{"puncho",	T_W,	L_NIL,	L_O,	R_NIL,	W_E,	puncho_f},
 	{"punchd",	T_W,	L_NIL,	L_D,	R_NIL,	W_E,	punchd_f},
@@ -1068,6 +1074,14 @@ static struct op operations[] = {
 	/* Terminator */
 	{NULL,		0,	0,	0,	0,	0,	NULL}
 };
+
+static bool
+is_punch(struct op *op)
+{
+	char prefix[] = "punch";
+
+	return (strncmp(op->o_name, prefix, strlen(prefix)) == 0);
+}
 
 /*
  * An excluded conflicting_rw case
@@ -1424,7 +1438,10 @@ uncertainty_check_exec_one(struct io_test_args *arg, int i, int j,
 		goto out;
 	}
 
-	/* Perform a. */
+	/*
+	 * Perform a. If is_punch(w), a may be rejected due to w's read
+	 * timestamp record.
+	 */
 	if (we <= bound) {
 		expected_arc = -DER_TX_RESTART;
 	} else {
@@ -1433,12 +1450,19 @@ uncertainty_check_exec_one(struct io_test_args *arg, int i, int j,
 		else
 			expected_arc = 0;
 	}
-	print_message("  %s(%s, "DF_U64") (expect %d): ",
-		      a->o_name, ap, ae, expected_arc);
+	if (is_punch(w) && we > bound)
+		print_message("  %s(%s, "DF_U64") (expect %d or %d): ",
+			      a->o_name, ap, ae, expected_arc, -DER_TX_RESTART);
+	else
+		print_message("  %s(%s, "DF_U64") (expect %d): ",
+			      a->o_name, ap, ae, expected_arc);
 	rc = a->o_func(arg, atx, ap, ae);
 	print_message("%d\n", rc);
-	if (rc != expected_arc)
+	if (rc != expected_arc) {
+		if (is_punch(w) && we > bound && rc == -DER_TX_RESTART)
+			goto out;
 		nfailed++;
+	}
 
 out:
 	if (nfailed > 0)
