@@ -1191,7 +1191,7 @@ conflicting_rw_exec_one(struct io_test_args *arg, int i, int j, bool empty,
 	}
 
 	print_message("CASE %d.%d: %s, %s(%s, "DF_U64"), %s(%s, "DF_U64"), "
-		      "%s TX [%d]\n", i, j, empty ? "empty" : "nonemtpy",
+		      "%s TX [%d]\n", i, j, empty ? "empty" : "nonempty",
 		      r->o_name, rp, re, w->o_name, wp, we,
 		      same_tx ? "same" : "diff", mvcc_arg->i);
 
@@ -1273,7 +1273,7 @@ out:
 	if (nfailed > 0)
 		print_message("FAILED: CASE %d.%d: %s, %s(%s, "DF_U64
 			      "), %s(%s, "DF_U64"), %s TX [%d]\n", i, j,
-			      empty ? "empty" : "nonemtpy", r->o_name, rp, re,
+			      empty ? "empty" : "nonempty", r->o_name, rp, re,
 			      w->o_name, wp, we, same_tx ? "same" : "diff",
 			      mvcc_arg->i);
 	return nfailed;
@@ -1393,7 +1393,7 @@ conflicting_rw(void **state)
 
 /* Return the number of failures observed. */
 static int
-uncertainty_check_exec_one(struct io_test_args *arg, int i, int j,
+uncertainty_check_exec_one(struct io_test_args *arg, int i, int j, bool empty,
 			   struct op *w, char *wp, daos_epoch_t we,
 			   struct op *a, char *ap, daos_epoch_t ae,
 			   daos_epoch_t bound, bool commit, int *skipped)
@@ -1408,15 +1408,31 @@ uncertainty_check_exec_one(struct io_test_args *arg, int i, int j,
 	int			 rc;
 
 #define DF_CASE								\
-	"CASE %d.%d: %s(%s, "DF_U64"), %s, %s(%s, "DF_U64") with bound "\
-	DF_U64" [%d]"
-#define DP_CASE(i, j, w, wp, we, commit, a, ap, ae, bound, argi)	\
-	i, j, w->o_name, wp, we, commit ? "commit" : "do not commit",	\
-	a->o_name, ap, ae, bound, argi
+	"CASE %d.%d: %s, %s(%s, "DF_U64"), %s, %s(%s, "DF_U64		\
+	") with bound "DF_U64" [%d]"
+#define DP_CASE(i, j, empty, w, wp, we, commit, a, ap, ae, bound, argi)	\
+	i, j, empty ? "empty" : "nonempty", w->o_name, wp, we,		\
+	commit ? "commit" : "do not commit", a->o_name, ap, ae, bound,	\
+	argi
 
 	print_message(DF_CASE"\n",
-		      DP_CASE(i, j, w, wp, we, commit, a, ap, ae, bound,
+		      DP_CASE(i, j, empty, w, wp, we, commit, a, ap, ae, bound,
 			      mvcc_arg->i));
+
+	/* If requested, prepare the data that will be overwritten by w. */
+	if (!empty) {
+		char		pp[L_COUNT + 1] = "coda";
+		daos_epoch_t	pe = ae - 1;
+
+		memcpy(pp, wp, strlen(wp));
+		print_message("  update(%s, "DF_U64") (expect 0): ", pp, pe);
+		rc = update_f(arg, NULL /* txh */, pp, pe);
+		print_message("%d\n", rc);
+		if (rc != 0) {
+			nfailed++;
+			goto out;
+		}
+	}
 
 	wtx->th_nr_ops = 1;
 	wtx->th_op_seq = 1;
@@ -1445,10 +1461,12 @@ uncertainty_check_exec_one(struct io_test_args *arg, int i, int j,
 	if (we <= bound) {
 		expected_arc = -DER_TX_RESTART;
 	} else {
-		if ((is_r(a) || is_rw(a)) && a->o_rtype == R_NE)
-			expected_arc = -DER_NONEXIST;
-		else
-			expected_arc = 0;
+		if ((is_r(a) || is_rw(a))) {
+			if (a->o_rtype == R_NE && empty)
+				expected_arc = -DER_NONEXIST;
+			else if (a->o_rtype == R_E && !empty)
+				expected_arc = -DER_EXIST;
+		}
 	}
 	if (is_punch(w) && we > bound)
 		print_message("  %s(%s, "DF_U64") (expect %d or %d): ",
@@ -1467,8 +1485,8 @@ uncertainty_check_exec_one(struct io_test_args *arg, int i, int j,
 out:
 	if (nfailed > 0)
 		print_message("FAILED: "DF_CASE"\n",
-			      DP_CASE(i, j, w, wp, we, commit, a, ap, ae, bound,
-				      mvcc_arg->i));
+			      DP_CASE(i, j, empty, w, wp, we, commit, a, ap, ae,
+				      bound, mvcc_arg->i));
 #undef DP_CASE
 #undef DF_CASE
 	return nfailed;
@@ -1486,7 +1504,9 @@ uncertainty_check_exec(struct io_test_args *arg, int i, struct op *w,
 	char		 wp[L_COUNT + 1];	/* w path */
 	char		 ap[L_COUNT + 1];	/* a path */
 	char		*path_template = "coda";
+	bool		 emptiness[] = {true, false};
 	int		 j = 0;
+	int		 k;
 	int		 nfailed = 0;
 
 	/* Set overlapping paths. */
@@ -1494,47 +1514,57 @@ uncertainty_check_exec(struct io_test_args *arg, int i, struct op *w,
 	set_path(a, path_template, ap);
 	D_ASSERTF(overlap(wp, ap), "overlap(\"%s\", \"%s\")", wp, ap);
 
-	/* Write at the uncertainty upper bound, commit, then do operation a. */
-	bound = mvcc_arg->epoch + 10;
-	we = bound;
-	ae = mvcc_arg->epoch;
-	nfailed += uncertainty_check_exec_one(arg, i, j, w, wp, we, a, ap, ae,
-					      bound, true /* commit */,
-					      skipped);
-	(*cases)++;
-	j++;
-	mvcc_arg->i++;
-	mvcc_arg->epoch += 100;
+	for (k = 0; k < ARRAY_SIZE(emptiness); k++) {
+		bool empty = emptiness[k];
 
-	/*
-	 * Write at the uncertainty upper bound, do not commit, then do
-	 * operation a.
-	 */
-	bound = mvcc_arg->epoch + 10;
-	we = bound;
-	ae = mvcc_arg->epoch;
-	nfailed += uncertainty_check_exec_one(arg, i, j, w, wp, we, a, ap, ae,
-					      bound, false /* commit */,
-					      skipped);
-	(*cases)++;
-	j++;
-	mvcc_arg->i++;
-	mvcc_arg->epoch += 100;
+		/*
+		 * Write at the uncertainty upper bound, commit, then do
+		 * operation a.
+		 */
+		bound = mvcc_arg->epoch + 10;
+		we = bound;
+		ae = mvcc_arg->epoch;
+		nfailed += uncertainty_check_exec_one(arg, i, j, empty, w, wp,
+						      we, a, ap, ae, bound,
+						      true /* commit */,
+						      skipped);
+		(*cases)++;
+		j++;
+		mvcc_arg->i++;
+		mvcc_arg->epoch += 100;
 
-	/*
-	 * Write above the uncertainty upper bound, commit, then do operation
-	 * a.
-	 */
-	bound = mvcc_arg->epoch + 10;
-	we = bound + 1;
-	ae = mvcc_arg->epoch;
-	nfailed += uncertainty_check_exec_one(arg, i, j, w, wp, we, a, ap, ae,
-					      bound, true /* commit */,
-					      skipped);
-	(*cases)++;
-	j++;
-	mvcc_arg->i++;
-	mvcc_arg->epoch += 100;
+		/*
+		 * Write at the uncertainty upper bound, do not commit, then do
+		 * operation a.
+		 */
+		bound = mvcc_arg->epoch + 10;
+		we = bound;
+		ae = mvcc_arg->epoch;
+		nfailed += uncertainty_check_exec_one(arg, i, j, empty, w, wp,
+						      we, a, ap, ae, bound,
+						      false /* commit */,
+						      skipped);
+		(*cases)++;
+		j++;
+		mvcc_arg->i++;
+		mvcc_arg->epoch += 100;
+
+		/*
+		 * Write above the uncertainty upper bound, commit, then do
+		 * operation a.
+		 */
+		bound = mvcc_arg->epoch + 10;
+		we = bound + 1;
+		ae = mvcc_arg->epoch;
+		nfailed += uncertainty_check_exec_one(arg, i, j, empty, w, wp,
+						      we, a, ap, ae, bound,
+						      true /* commit */,
+						      skipped);
+		(*cases)++;
+		j++;
+		mvcc_arg->i++;
+		mvcc_arg->epoch += 100;
+	}
 
 	return nfailed;
 }
